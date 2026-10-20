@@ -1,0 +1,121 @@
+Subscriber (komputer):
+
+import paho.mqtt.client as mqtt
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from collections import deque
+
+broker_address = "192.168.1.19"
+broker_port = 1883
+topic_sensor = "sensor/data"
+topic_control = "control/led"
+TEMP_THRESHOLD = 25.0            # próg temperatury [°C] 
+
+temps = deque(maxlen=60)         # ostatnie 60 pomiarów (5 min)
+hums = deque(maxlen=60)
+
+def on_message(client, userdata, message):
+    payload = message.payload.decode("utf-8")
+    temp, hum = map(float, payload.split(" "))
+    temps.append(temp)
+    hums.append(hum)
+    cmd = "ON" if temp > TEMP_THRESHOLD else "OFF"
+    client.publish(topic_control, cmd)
+    print(f"temperature: {temp} humidity: {hum} -> {cmd}")
+
+def update_plot(frame):
+    x = [i * 5 for i in range(len(temps))]
+    ax.clear()
+    ax.plot(x, list(temps), label="Temperatura [°C]")
+    ax.plot(x, list(hums), label="Wilgotność [%]")
+    ax.axhline(TEMP_THRESHOLD, color="r", linestyle="--", label="Próg")
+    ax.set_xlabel("Czas [s]")
+    ax.legend(loc="upper left")
+    ax.grid(True)
+
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+client.on_message = on_message
+client.connect(broker_address, broker_port)
+client.subscribe(topic_sensor)
+print(f"Topic subscription '{topic_sensor}' on broker {broker_address}:{broker_port}")
+client.loop_start()
+
+fig, ax = plt.subplots()
+ani = FuncAnimation(fig, update_plot, interval=5000, cache_frame_data=False)
+try:
+    plt.show()
+finally:
+    client.loop_stop()
+    client.disconnect()
+
+Publisher (Raspberry Pi):
+
+import time
+import random
+import pigpio
+import RPi.GPIO as GPIO
+import paho.mqtt.client as mqtt
+
+broker_address = "192.168.1.19"
+broker_port = 1883
+topic_sensor = "sensor/data"
+topic_control = "control/led"
+
+led_pin = 19
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(led_pin, GPIO.OUT)
+GPIO.output(led_pin, GPIO.LOW)
+
+pi = pigpio.pi()
+if not pi.connected:
+    GPIO.cleanup()
+    exit("Uruchom: sudo pigpiod")
+sensor = pi.spi_open(1, 1000000, 0)
+
+def read_sensor():
+    c, d = pi.spi_read(sensor, 2)
+    if c != 2:
+        return None, None
+    sign = (d[0] & 0x80) >> 7
+    value = (((d[0] & 0x7F) << 8) | d[1]) >> 5
+    temp = value * 0.125
+    temp = -temp if sign else temp
+    humidity = random.randint(500, 999) / 10
+    return humidity, temp
+
+def publish_data(client):
+    humidity, temperature = read_sensor()
+    if humidity is not None and temperature is not None:
+        payload = f"{temperature:.2f} {humidity:.2f}"
+        client.publish(topic_sensor, payload)
+        print(f"Published: {payload}")
+    else:
+        print("Read error!")
+
+def on_message(client, userdata, message):
+    cmd = message.payload.decode("utf-8")
+    if cmd == "ON":
+        GPIO.output(led_pin, GPIO.HIGH)
+    elif cmd == "OFF":
+        GPIO.output(led_pin, GPIO.LOW)
+    print(f"Received: {cmd}")
+
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+client.on_message = on_message
+client.connect(broker_address, broker_port, 60)
+client.subscribe(topic_control)
+client.loop_start()
+
+try:
+    while True:
+        publish_data(client)
+        time.sleep(5)
+except KeyboardInterrupt:
+    pass
+finally:
+    GPIO.cleanup()
+    client.loop_stop()
+    client.disconnect()
+    pi.spi_close(sensor)
+    pi.stop()
