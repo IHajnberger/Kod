@@ -1,0 +1,71 @@
+Publisher (Raspberry Pi)
+
+import time
+import random
+import pigpio
+import paho.mqtt.client as mqtt
+
+broker_address = "192.168.1.19"   
+broker_port = 1883
+topic = "sensor/data"
+
+pi = pigpio.pi()
+if not pi.connected:
+    exit("Uruchom: sudo pigpiod")
+sensor = pi.spi_open(1, 1000000, 0)
+
+def read_sensor():
+    c, d = pi.spi_read(sensor, 2)
+    if c != 2:
+        return None, None
+    sign = (d[0] & 0x80) >> 7
+    value = (((d[0] & 0x7F) << 8) | d[1]) >> 5
+    temp = value * 0.125
+    temp = -temp if sign else temp
+    humidity = random.randint(500, 999) / 10   # losowa wilgotność [%]
+    return humidity, temp
+
+def publish_data(client):
+    humidity, temperature = read_sensor()
+    if humidity is not None and temperature is not None:
+        payload = f"{temperature:.2f} {humidity:.2f}"
+        client.publish(topic, payload)
+        print(f"Published: {payload}")
+    else:
+        print("Read error!")
+
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+client.connect(broker_address, broker_port, 60)
+client.loop_start()
+try:
+    while True:
+        publish_data(client)
+        time.sleep(5)
+except KeyboardInterrupt:
+    pass
+finally:
+    client.loop_stop()
+    client.disconnect()
+    pi.spi_close(sensor)
+    pi.stop()
+
+------------------------------------------------------------------------------
+Subscriber (komputer):
+
+import paho.mqtt.client as mqtt
+
+broker_address = "192.168.1.19"
+broker_port = 1883
+topic = "sensor/data"
+
+def on_message(client, userdata, message):
+    payload = message.payload.decode("utf-8")
+    temp, hum = map(float, payload.split(" "))
+    print(f"temperature: {temp} humidity: {hum}")
+
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+client.on_message = on_message
+client.connect(broker_address, broker_port)
+client.subscribe(topic)
+print(f"Topic subscription '{topic}' on broker {broker_address}:{broker_port}")
+client.loop_forever()
